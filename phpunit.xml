@@ -17,23 +17,38 @@
             <directory>app</directory>
         </include>
     </source>
+    <!--
+        Переменные задаются и через <env>, и через <server>.
+        docker-compose пробрасывает те же имена в окружение процесса, а Laravel
+        читает $_SERVER раньше $_ENV — без <server> тесты уехали бы на dev-базу.
+    -->
     <php>
-        <env name="APP_ENV" value="testing"/>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <server name="APP_ENV" value="testing"/>
         <!-- В тестах поднимаем и магазин, и заглушку: заглушку надо дёргать напрямую. -->
-        <env name="APP_ROLE" value="all"/>
-        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
-        <env name="BCRYPT_ROUNDS" value="4"/>
-        <env name="BROADCAST_CONNECTION" value="null"/>
-        <env name="CACHE_STORE" value="array"/>
+        <env name="APP_ROLE" value="all" force="true"/>
+        <server name="APP_ROLE" value="all"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file" force="true"/>
+        <server name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4" force="true"/>
+        <server name="BCRYPT_ROUNDS" value="4"/>
+        <env name="CACHE_STORE" value="array" force="true"/>
+        <server name="CACHE_STORE" value="array"/>
         <!--
             Только PostgreSQL: инварианты держатся на частичных индексах,
             jsonb, numeric и FOR UPDATE SKIP LOCKED. На sqlite это не проверить.
         -->
-        <env name="DB_CONNECTION" value="pgsql"/>
-        <env name="DB_DATABASE" value="gamestore_test"/>
-        <env name="DB_URL" value=""/>
-        <env name="MAIL_MAILER" value="array"/>
-        <env name="QUEUE_CONNECTION" value="sync"/>
-        <env name="SESSION_DRIVER" value="array"/>
+        <env name="DB_CONNECTION" value="pgsql" force="true"/>
+        <server name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_DATABASE" value="gamestore_test" force="true"/>
+        <server name="DB_DATABASE" value="gamestore_test"/>
+        <env name="DB_URL" value="" force="true"/>
+        <server name="DB_URL" value=""/>
+        <env name="MAIL_MAILER" value="array" force="true"/>
+        <server name="MAIL_MAILER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <server name="QUEUE_CONNECTION" value="sync"/>
+        <env name="SESSION_DRIVER" value="array" force="true"/>
+        <server name="SESSION_DRIVER" value="array"/>
     </php>
 </phpunit>

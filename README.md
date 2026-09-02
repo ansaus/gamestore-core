@@ -40,8 +40,97 @@ make test        # тесты
 ```bash
 docker compose up -d --build
 docker compose exec -T app php artisan migrate --force
+docker compose exec -T app php artisan db:seed --force
 docker compose exec -T app php artisan test
 ```
+
+## Быстрая проверка
+
+```bash
+# 1. создать заказ
+curl -sX POST localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -H 'Idempotency-Key: demo-1' \
+  -d '{"sku":"KEY-CS2-PRIME"}'
+# -> 201 {"id":"ord_00001","amount":"1290.00","status":"created",...}
+#    повтор с тем же Idempotency-Key -> 200 и тот же заказ
+
+# 2. оплата
+curl -sX POST localhost:8080/api/webhooks/payment \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -d '{"event_id":"evt_1","order_id":"ord_00001","status":"paid",
+       "amount":1290,"currency":"RUB","created_at":"2026-09-02T12:00:00Z"}'
+# -> 200 {"result":"applied"}      повтор того же event_id -> {"result":"duplicate"}
+
+# 3. заказ с кодом (выдача асинхронная, ~секунда)
+curl -s localhost:8080/api/orders/ord_00001 -H 'Accept: application/json'
+# -> {"status":"delivered","delivery":{"code":"LFXC-TNCS-BPCD","supplier":"A",...}}
+```
+
+## API
+
+| Метод | Путь | Ответы |
+|---|---|---|
+| `POST` | `/api/orders` | `201` создан, `200` повтор по `Idempotency-Key`, `404` нет sku, `409` sku неактивен |
+| `GET` | `/api/orders/{id}` | `200` заказ с `delivery` и `timeline`, `404` |
+| `POST` | `/api/webhooks/payment` | `200` принято или дубль, `400` невалидный payload, `5xx` сбой БД |
+
+`GET /api/catalog` — этап 5; `/api/admin/*` — этап 4.
+
+Тело `GET /api/orders/{id}` — надмножество ответа на создание: одна и та же
+структура на оба эндпоинта. Деньги отдаются строкой (`"1290.00"`), чтобы клиент
+не превратил их во float.
+
+`timeline` собирается из отметок времени самого заказа — отдельной таблицы истории
+в схеме SPEC §2 нет. Статусы без своей колонки (`delivering`, `out_of_stock`, …)
+показываются одной точкой по `updated_at`.
+
+Возможные `result` вебхука:
+
+| result | Когда |
+|---|---|
+| `applied` | событие изменило статус заказа |
+| `duplicate` | такой `event_id` уже принимали |
+| `orphan` | заказа ещё нет; событие сохранено и ждёт подхвата (этап 2) |
+| `stale` | `failed` после подтверждённой оплаты — статус не откатываем |
+| `ignored_terminal` | заказ уже в этом или более позднем состоянии |
+
+## Заглушка поставщика
+
+```bash
+# детерминированное поведение для сценариев
+curl -sX POST localhost:8090/stub/config -H 'Content-Type: application/json' \
+  -d '{"supplier":"A","force":"out_of_stock"}'
+#   force: none | timeout_after_issue | http_500 | out_of_stock
+#   плюс fail_rate, timeout_rate, latency_ms, timeout_sleep_ms
+
+curl -s  localhost:8090/stub/state      # остатки пула, выданные ключи, счётчики
+curl -sX POST localhost:8090/stub/reset # вернуть пул в исходное состояние
+```
+
+Пул из `docs/keys.json` делится фиксированно: первые 30 ключей → поставщик A,
+последние 20 → B. Случайное деление сделало бы сценарии `out_of_stock` и фолбэка
+невоспроизводимыми.
+
+Заглушка **сначала фиксирует выдачу в БД и только потом «зависает»** — иначе
+сценарий «таймаут, но код уже выдан» не воспроизводится. Повтор с тем же
+`request_id` всегда возвращает тот же код и не тратит второй ключ.
+
+## Инварианты в БД
+
+Каждый пункт закрыт ограничением, а не только кодом:
+
+| # | Инвариант | Чем закрыт |
+|---|---|---|
+| I1 | не больше одной выдачи на заказ | `deliveries.order_id` PRIMARY KEY |
+| I2 | один код не уйдёт в два заказа | `deliveries.code` UNIQUE + `stub.stub_keys.code` UNIQUE |
+| I3 | `event_id` применяется один раз | `payment_events.event_id` PK + `INSERT ... ON CONFLICT DO NOTHING` |
+| I4 | повтор `request_id` → тот же код | `stub.stub_issues.request_id` PRIMARY KEY |
+| I5 | финальный статус не откатывается | условный `UPDATE ... WHERE status IN (...)` + проверка rowcount |
+| I6 | журнал денег сходится | двойная запись + `unique (ref_type, ref_id, account, direction)` |
+| I7 | HTTP не внутри транзакции БД | вызов поставщика вынесен между двумя транзакциями |
+
+Заглушка живёт в отдельной схеме Postgres `stub` — её состояние не смешивается с доменом.
 
 ## Тесты
 
@@ -49,13 +138,34 @@ docker compose exec -T app php artisan test
 подъёме `postgres`), а не по sqlite: инварианты держатся на частичных индексах, `jsonb`,
 `numeric` и `FOR UPDATE SKIP LOCKED` — на sqlite это не проверяется.
 
+HTTP к поставщику в тестах не уходит в сеть: транспорт подменяется, но логика заглушки
+остаётся настоящей — тот же `StubIssuer` и та же БД. Настоящий сетевой прогон — в
+сценариях приёмки (`make race` и далее, этапы 2–3).
+
 ## Состояние
 
 | Этап SPEC | Статус |
 |---|---|
 | 0. Bootstrap: каркас, Docker, БД, тесты | готово |
-| 1. Ядро API + авто-выдача | в работе |
+| 1. Ядро API + авто-выдача | готово |
 | 2. Exactly-once под гонками | — |
 | 3. Устойчивые интеграции, таймаут ≠ отказ | — |
 | 4. Сверка, логи, восстановление | — |
 | 5. Каталог под нагрузкой | — |
+
+Что уже есть за пределами минимума этапа 1 и почему:
+
+- **вся схема из SPEC §2 сразу**, включая `supplier_requests`, `unclaimed_codes` и
+  `ledger_entries` — схема оценивается как целое, а дробить её по этапам означало бы
+  переписывать миграции на каждом шаге;
+- **журнал денежных движений** — проводки пишутся в тех же транзакциях, что применение
+  платежа и выдача. Добавлять их позже значило бы переоткрывать и перепроверять обе;
+- **заглушка целиком**, вместе с `force`-режимами — без неё этап 1 нечем довести до
+  `delivered`, а `force` нужен, чтобы тесты не флакали на `mt_rand`;
+- **структурные JSON-логи в stdout** — канал `json` уже был прописан в `.env.example`.
+
+Осознанно отложено:
+
+- подхват осиротевших событий и разбор порядка по `occurred_at` — этап 2;
+- ретраи тем же `request_id`, фолбэк A→B, обработка `unknown` без ухода к B — этап 3.
+  Сейчас неопределённый исход закрывает заказ в восстановимый `delivery_failed`.

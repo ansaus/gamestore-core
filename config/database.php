@@ -95,7 +95,9 @@ return [
             'charset' => env('DB_CHARSET', 'utf8'),
             'prefix' => '',
             'prefix_indexes' => true,
-            'search_path' => 'public',
+            // Заглушка поставщика живёт в отдельной схеме: её таблицы — не домен.
+            // Схема в search_path, чтобы migrate:fresh их тоже сносил.
+            'search_path' => 'public,'.env('STUB_DB_SCHEMA', 'stub'),
             'sslmode' => env('DB_SSLMODE', 'prefer'),
         ],
 
