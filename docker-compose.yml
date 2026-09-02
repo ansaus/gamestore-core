@@ -1,0 +1,75 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/php/Dockerfile
+    args:
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+  image: gamestore-core-app:latest
+  volumes:
+    - .:/var/www/html
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gamestore
+      POSTGRES_USER: gamestore
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sh:/docker-entrypoint-initdb.d/10-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamestore -d gamestore"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  app:
+    <<: *app
+
+  supplier-stub:
+    <<: *app
+    environment:
+      APP_ROLE: stub
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"   # store API
+      - "8090:90"   # supplier stub
+    volumes:
+      - .:/var/www/html
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+      - supplier-stub
+
+  worker:
+    <<: *app
+    command: php artisan queue:work --queue=default --tries=1 --timeout=90 --sleep=1
+
+  scheduler:
+    <<: *app
+    command: php artisan schedule:work
+
+volumes:
+  pgdata:
