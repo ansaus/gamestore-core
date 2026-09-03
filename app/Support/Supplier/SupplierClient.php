@@ -9,16 +9,50 @@ use Illuminate\Support\Facades\Log;
 /**
  * HTTP-клиент поставщика.
  *
- * Вся ценность класса — в классификации исхода (SPEC §7.2). Отличать
- * определённый отказ от неопределённости обязательно: из неопределённости
- * нельзя уходить к другому поставщику, иначе спишем два ключа.
+ * Две вещи, ради которых класс существует.
  *
- * Ретраи и фолбэк — этап 3. Здесь одна попытка.
+ * 1. Классификация исхода (SPEC §7.2). Определённый отказ и неопределённость —
+ *    разные вещи: из неопределённости нельзя уходить к другому поставщику,
+ *    иначе спишем два ключа за один заказ.
+ *
+ * 2. Ретраи с НЕИЗМЕННЫМ request_id. Это единственный способ выполнить
+ *    требование «повтор после таймаута не создаёт вторую выдачу»: повтор
+ *    работает как probe — он либо вернёт код, выданный на первой попытке,
+ *    либо выдаст новый, но никогда не выдаст второй.
+ *
+ * Ретраим только неопределённость. Успех ретраить незачем, а определённый
+ * отказ поставщик уже подтвердил — повтор ничего не изменит.
  */
 class SupplierClient
 {
     public function issue(string $supplier, string $requestId, string $orderId, string $sku): SupplierOutcome
     {
+        $maxAttempts = max(1, (int) config('gamestore.supplier.max_attempts'));
+        $outcome = SupplierOutcome::unknown('not_attempted');
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $outcome = $this->attempt($supplier, $requestId, $orderId, $sku, $attempt);
+
+            if ($outcome->kind !== SupplierOutcomeKind::Unknown) {
+                return $outcome->afterAttempts($attempt);
+            }
+
+            if ($attempt < $maxAttempts) {
+                $this->backoff($attempt);
+            }
+        }
+
+        return $outcome->afterAttempts($maxAttempts);
+    }
+
+    /** Одна попытка. request_id тот же самый, что и на всех остальных. */
+    private function attempt(
+        string $supplier,
+        string $requestId,
+        string $orderId,
+        string $sku,
+        int $attempt,
+    ): SupplierOutcome {
         $url = rtrim((string) config('gamestore.supplier.base_url'), '/')
             .'/supplier/'.strtolower($supplier).'/issue';
 
@@ -35,15 +69,35 @@ class SupplierClient
                 ]);
         } catch (ConnectionException $e) {
             $outcome = SupplierOutcome::unknown('timeout');
-            $this->log($supplier, $requestId, $orderId, $outcome, null, $startedAt);
+            $this->log($supplier, $requestId, $orderId, $outcome, null, $startedAt, $attempt);
 
             return $outcome;
         }
 
         $outcome = $this->classify($response->status(), $response->json());
-        $this->log($supplier, $requestId, $orderId, $outcome, $response->status(), $startedAt);
+        $this->log($supplier, $requestId, $orderId, $outcome, $response->status(), $startedAt, $attempt);
 
         return $outcome;
+    }
+
+    /**
+     * Экспоненциальный бэкофф с джиттером ±30%.
+     *
+     * Джиттер не украшение: без него все заказы, упавшие в одну секунду,
+     * пойдут на ретрай одной волной и добьют поставщика, который только
+     * начал подниматься.
+     */
+    private function backoff(int $attempt): void
+    {
+        $base = (int) config('gamestore.supplier.backoff_ms') * (2 ** ($attempt - 1));
+
+        if ($base <= 0) {
+            return;
+        }
+
+        $jitter = random_int(-30, 30) / 100;
+
+        usleep((int) round($base * (1 + $jitter) * 1000));
     }
 
     /** @param array<string, mixed>|null $body */
@@ -77,6 +131,7 @@ class SupplierClient
         SupplierOutcome $outcome,
         ?int $status,
         int $startedAt,
+        int $attempt,
     ): void {
         $event = match ($outcome->kind) {
             SupplierOutcomeKind::Unknown => $outcome->reason === 'timeout'
@@ -90,6 +145,7 @@ class SupplierClient
             'order_id' => $orderId,
             'request_id' => $requestId,
             'supplier' => $supplier,
+            'attempt' => $attempt,
             'http_status' => $status,
             'outcome' => strtolower($outcome->kind->name),
             'reason' => $outcome->reason,

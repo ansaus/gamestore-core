@@ -3,7 +3,7 @@ EXEC := $(DC) exec -T app
 
 .DEFAULT_GOAL := help
 .PHONY: help up down build migrate fresh seed test race \
-        scenario-timeout scenario-fallback scenario-oos \
+        scenario-timeout scenario-fallback scenario-unknown scenario-oos \
         scenario-race scenario-race-dup scenario-race-mixed \
         reconcile bench logs shell stub-reset
 
@@ -53,8 +53,11 @@ race: scenario-race scenario-race-dup scenario-race-mixed ## All three race mode
 scenario-timeout: ## Scenario 4: supplier times out AFTER issuing a code
 	$(EXEC) php scripts/scenario_timeout.php
 
-scenario-fallback: ## Scenario 5: supplier A down -> fallback to B
+scenario-fallback: ## Scenario 5: supplier A rejects for sure -> fallback to B
 	$(EXEC) php scripts/scenario_fallback.php
+
+scenario-unknown: ## Supplier A stays unknown -> fallback to B is FORBIDDEN
+	$(EXEC) php scripts/scenario_unknown.php
 
 scenario-oos: ## Scenario 6: empty stock -> out_of_stock -> refill -> delivered
 	$(EXEC) php scripts/scenario_oos.php

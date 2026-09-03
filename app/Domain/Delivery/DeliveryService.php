@@ -9,6 +9,7 @@ use App\Domain\Order\OrderTransitions;
 use App\Support\Supplier\SupplierClient;
 use App\Support\Supplier\SupplierOutcome;
 use App\Support\Supplier\SupplierOutcomeKind;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -16,12 +17,14 @@ use Illuminate\Support\Facades\Log;
  * Выдача заказа.
  *
  * Структура метода подчинена инварианту I7: HTTP к поставщику идёт МЕЖДУ
- * двумя транзакциями, а не внутри одной. Держать открытую транзакцию на
- * время сетевого вызова — это блокировка строки заказа на секунды и
- * гарантированный затык под нагрузкой.
+ * транзакциями, а не внутри. Держать открытую транзакцию на время сетевого
+ * вызова — это блокировка строки заказа на секунды и затык под нагрузкой.
  *
- * Этап 1: один поставщик, одна попытка. Ретраи тем же request_id,
- * фолбэк A→B и разбор состояния unknown — этап 3.
+ * Главное правило этапа 3 (SPEC §7.3): фолбэк A→B разрешён ТОЛЬКО когда
+ * состояние A определённое. Неопределённость (таймаут, 5xx) — не отказ:
+ * поставщик мог выдать код, и уход к B списал бы второй ключ за тот же заказ.
+ * В этом случае заказ остаётся в delivering и ждёт следующего цикла, где его
+ * допытывают тем же request_id.
  */
 class DeliveryService
 {
@@ -39,27 +42,65 @@ class DeliveryService
             return;
         }
 
-        $supplier = (string) config('gamestore.supplier.order')[0];
-        $requestId = SupplierRequest::idFor($order->id, $supplier);
+        $suppliers = array_values((array) config('gamestore.supplier.order'));
 
-        $this->registerAttempt($order, $supplier, $requestId);
+        foreach ($suppliers as $i => $supplier) {
+            $requestId = SupplierRequest::idFor($order->id, $supplier);
 
-        Log::info('delivery.started', [
-            'event' => 'delivery.started',
-            'order_id' => $order->id,
-            'request_id' => $requestId,
-            'supplier' => $supplier,
-        ]);
+            if ($i > 0) {
+                Log::info('supplier.fallback', [
+                    'event' => 'supplier.fallback',
+                    'order_id' => $order->id,
+                    'request_id' => $requestId,
+                    'supplier' => $supplier,
+                    'outcome' => 'fallback_from_'.strtolower((string) $suppliers[$i - 1]),
+                ]);
+            }
 
-        // --- вне транзакции ---
-        $outcome = $this->client->issue($supplier, $requestId, $order->id, $order->sku);
-        // ----------------------
+            $this->markInFlight($order, $supplier, $requestId);
 
-        match ($outcome->kind) {
-            SupplierOutcomeKind::Succeeded => $this->finalize($order, $supplier, $requestId, (string) $outcome->code),
-            SupplierOutcomeKind::Rejected => $this->reject($order, $requestId, $outcome),
-            SupplierOutcomeKind::Unknown => $this->giveUpForNow($order, $requestId, $outcome),
-        };
+            Log::info('delivery.started', [
+                'event' => 'delivery.started',
+                'order_id' => $order->id,
+                'request_id' => $requestId,
+                'supplier' => $supplier,
+                'attempt' => $order->attempts,
+            ]);
+
+            // --- вне транзакции (I7). Внутри — до 3 попыток тем же request_id.
+            $outcome = $this->client->issue($supplier, $requestId, $order->id, $order->sku);
+            // ---------------------------------------------------------------
+
+            if ($outcome->kind === SupplierOutcomeKind::Succeeded) {
+                $this->finalize($order, $supplier, $requestId, $outcome);
+
+                return;
+            }
+
+            if ($outcome->kind === SupplierOutcomeKind::Unknown) {
+                // Таймаут ≠ отказ. Выйти отсюда к следующему поставщику
+                // нельзя ни при каких обстоятельствах.
+                $this->holdForRetry($order, $supplier, $requestId, $outcome);
+
+                return;
+            }
+
+            // Определённый отказ: этот поставщик точно ничего не выдал,
+            // ключ не потрачен, фолбэк безопасен.
+            $this->recordOutcome($requestId, SupplierRequestState::Failed, $outcome);
+
+            Log::warning('delivery.rejected', [
+                'event' => 'delivery.rejected',
+                'order_id' => $order->id,
+                'request_id' => $requestId,
+                'supplier' => $supplier,
+                'outcome' => 'rejected',
+                'reason' => $outcome->reason,
+            ]);
+        }
+
+        // Все поставщики отказали определённо — кода нет ни у кого.
+        $this->outOfStock($order);
     }
 
     /**
@@ -74,6 +115,19 @@ class DeliveryService
                 return null;
             }
 
+            // Повторный заход в уже идущую выдачу — путь фонового доведения
+            // для заказа, чей исход остался невыясненным. Статус менять не на
+            // что: delivering и есть честное описание происходящего.
+            if ($order->status === OrderStatus::Delivering) {
+                DB::table('orders')->where('id', $orderId)->update([
+                    'attempts' => DB::raw('attempts + 1'),
+                    'next_attempt_at' => null,
+                    'updated_at' => now(),
+                ]);
+
+                return $order->refresh();
+            }
+
             // Повторный запуск для уже выданного заказа — штатный no-op,
             // на этом стоит безопасность фонового доведения.
             $startable = [OrderStatus::Paid, OrderStatus::OutOfStock, OrderStatus::DeliveryFailed];
@@ -84,13 +138,17 @@ class DeliveryService
 
             $this->transitions->apply($orderId, [$order->status], OrderStatus::Delivering, [
                 'attempts' => DB::raw('attempts + 1'),
+                // Цикл начался: заявка на следующий больше не актуальна.
+                // Новую поставит holdForRetry, если исход останется неясным.
+                'next_attempt_at' => null,
             ]);
 
             return $order->refresh();
         });
     }
 
-    private function registerAttempt(Order $order, string $supplier, string $requestId): void
+    /** Заявка к поставщику. request_id детерминирован, строка одна на пару (заказ, поставщик). */
+    private function markInFlight(Order $order, string $supplier, string $requestId): void
     {
         DB::table('supplier_requests')->upsert(
             [[
@@ -99,38 +157,49 @@ class DeliveryService
                 'supplier' => $supplier,
                 'sku' => $order->sku,
                 'state' => SupplierRequestState::InFlight->value,
-                'attempts' => 1,
+                'attempts' => 0,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]],
             ['request_id'],
-            [
-                'state' => SupplierRequestState::InFlight->value,
-                'attempts' => DB::raw('supplier_requests.attempts + 1'),
-                'updated_at' => now(),
-            ],
+            ['state' => SupplierRequestState::InFlight->value, 'updated_at' => now()],
         );
+    }
+
+    /** Итог обращения. attempts копится по всем циклам — это счётчик HTTP-попыток. */
+    private function recordOutcome(
+        string $requestId,
+        SupplierRequestState $state,
+        SupplierOutcome $outcome,
+    ): void {
+        DB::table('supplier_requests')->where('request_id', $requestId)->update([
+            'state' => $state->value,
+            'code' => $outcome->code,
+            'error_reason' => $outcome->reason,
+            'attempts' => DB::raw('attempts + '.$outcome->attempts),
+            'updated_at' => now(),
+        ]);
     }
 
     /**
      * Код получен. Всё, что делает заказ выданным, происходит в одной транзакции:
      * факт выдачи, статус, остаток, проводки.
      */
-    private function finalize(Order $order, string $supplier, string $requestId, string $code): void
-    {
-        DB::transaction(function () use ($order, $supplier, $requestId, $code): void {
+    private function finalize(
+        Order $order,
+        string $supplier,
+        string $requestId,
+        SupplierOutcome $outcome,
+    ): void {
+        $code = (string) $outcome->code;
+
+        DB::transaction(function () use ($order, $supplier, $requestId, $outcome, $code): void {
             $order = Order::where('id', $order->id)->lockForUpdate()->first();
 
             if (Delivery::where('order_id', $order->id)->exists()) {
                 // Ответ поставщика опоздал: заказ закрыт другой выдачей.
                 // Код не выбрасываем — он оплачен, идёт в сверку и возврат.
-                UnclaimedCode::create([
-                    'request_id' => $requestId,
-                    'order_id' => $order->id,
-                    'supplier' => $supplier,
-                    'code' => $code,
-                    'reason' => 'late_response_after_delivery',
-                ]);
+                $this->parkUnclaimed($order, $supplier, $requestId, $code, 'late_response_after_delivery');
 
                 Log::warning('delivery.blocked_duplicate', [
                     'event' => 'delivery.blocked_duplicate',
@@ -143,16 +212,56 @@ class DeliveryService
                 return;
             }
 
-            // PK по order_id + UNIQUE по code — последний рубеж exactly-once.
-            Delivery::create([
-                'order_id' => $order->id,
-                'code' => $code,
-                'supplier' => $supplier,
-                'request_id' => $requestId,
-            ]);
+            try {
+                // PK по order_id + UNIQUE по code — последний рубеж exactly-once.
+                //
+                // Вложенная транзакция здесь не для атомарности, а ради
+                // SAVEPOINT: в Postgres нарушение ограничения отменяет всю
+                // транзакцию целиком, и без точки сохранения писать после
+                // catch было бы уже некуда.
+                DB::transaction(fn () => Delivery::create([
+                    'order_id' => $order->id,
+                    'code' => $code,
+                    'supplier' => $supplier,
+                    'request_id' => $requestId,
+                ]));
+            } catch (UniqueConstraintViolationException) {
+                // Поставщик выдал код, уже проданный другому заказу (I2).
+                // Это его баг, но продать один ключ дважды мы не имеем права:
+                // выдачу не создаём, код паркуем в сверку, орём в лог.
+                $this->parkUnclaimed($order, $supplier, $requestId, $code, 'code_already_sold');
+
+                DB::table('supplier_requests')->where('request_id', $requestId)->update([
+                    'state' => SupplierRequestState::Failed->value,
+                    'error_reason' => 'code_already_sold',
+                    'updated_at' => now(),
+                ]);
+
+                // Заказ остаётся delivering — доведение отдаём watchdog'у.
+                DB::table('orders')
+                    ->where('id', $order->id)
+                    ->where('status', OrderStatus::Delivering->value)
+                    ->update([
+                        'next_attempt_at' => now()->addSeconds(
+                            (int) config('gamestore.supplier.unknown_retry_delay')
+                        ),
+                        'updated_at' => now(),
+                    ]);
+
+                Log::error('delivery.code_conflict', [
+                    'event' => 'delivery.code_conflict',
+                    'order_id' => $order->id,
+                    'request_id' => $requestId,
+                    'supplier' => $supplier,
+                    'outcome' => 'code_already_sold',
+                ]);
+
+                return;
+            }
 
             $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::Delivered, [
                 'delivered_at' => now(),
+                'next_attempt_at' => null,
             ]);
 
             // Витрина остатков. Уходить в минус не даёт CHECK, но условие
@@ -165,11 +274,7 @@ class DeliveryService
                     'updated_at' => now(),
                 ]);
 
-            DB::table('supplier_requests')->where('request_id', $requestId)->update([
-                'state' => SupplierRequestState::Succeeded->value,
-                'code' => $code,
-                'updated_at' => now(),
-            ]);
+            $this->recordOutcome($requestId, SupplierRequestState::Succeeded, $outcome);
 
             $this->ledger->recordDelivery($order, $requestId);
 
@@ -183,53 +288,104 @@ class DeliveryService
         });
     }
 
-    /** Определённый отказ: кода нет. Состояние восстановимое. */
-    private function reject(Order $order, string $requestId, SupplierOutcome $outcome): void
-    {
-        DB::transaction(function () use ($order, $requestId, $outcome): void {
-            DB::table('supplier_requests')->where('request_id', $requestId)->update([
-                'state' => SupplierRequestState::Failed->value,
-                'error_reason' => $outcome->reason,
-                'updated_at' => now(),
-            ]);
+    /**
+     * Исход не выяснен после всех попыток.
+     *
+     * Заказ НЕ провален и НЕ уходит к другому поставщику: мы не знаем, выдал
+     * ли этот код. Остаёмся в delivering, ставим next_attempt_at — следующий
+     * цикл допытается тем же request_id. Осознанный выбор: лучше задержать
+     * выдачу, чем задвоить.
+     *
+     * Терпение не бесконечно: после max_delivery_cycles циклов сдаёмся в
+     * delivery_failed — восстановимое состояние, но уже с алертом в логах.
+     */
+    private function holdForRetry(
+        Order $order,
+        string $supplier,
+        string $requestId,
+        SupplierOutcome $outcome,
+    ): void {
+        $exhausted = $order->attempts >= (int) config('gamestore.supplier.max_delivery_cycles');
+        $delay = (int) config('gamestore.supplier.unknown_retry_delay');
+        $nextAttemptAt = now()->addSeconds($delay);
 
-            $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::OutOfStock);
+        DB::transaction(function () use ($order, $requestId, $outcome, $exhausted, $nextAttemptAt): void {
+            $this->recordOutcome($requestId, SupplierRequestState::Unknown, $outcome);
+
+            if ($exhausted) {
+                $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::DeliveryFailed, [
+                    'next_attempt_at' => $nextAttemptAt,
+                ]);
+
+                return;
+            }
+
+            // Статус не трогаем: delivering — честное описание того, что
+            // происходит. Заказ не провален, исход просто ещё не известен.
+            DB::table('orders')
+                ->where('id', $order->id)
+                ->where('status', OrderStatus::Delivering->value)
+                ->update(['next_attempt_at' => $nextAttemptAt, 'updated_at' => now()]);
+        });
+
+        $context = [
+            'order_id' => $order->id,
+            'request_id' => $requestId,
+            'supplier' => $supplier,
+            'attempt' => $order->attempts,
+            'outcome' => 'unknown',
+            'reason' => $outcome->reason,
+            'next_attempt_at' => $nextAttemptAt->toIso8601String(),
+        ];
+
+        if ($exhausted) {
+            Log::error('delivery.failed', ['event' => 'delivery.failed'] + $context);
+
+            return;
+        }
+
+        Log::warning('delivery.deferred', ['event' => 'delivery.deferred'] + $context);
+    }
+
+    /**
+     * Код есть, а отдать его этому заказу нельзя. Не выбрасываем: он оплачен,
+     * его место — в сверке и возврате. insertOrIgnore, потому что повторный
+     * заход по тому же request_id упрётся в UNIQUE и это не ошибка.
+     */
+    private function parkUnclaimed(
+        Order $order,
+        string $supplier,
+        string $requestId,
+        string $code,
+        string $reason,
+    ): void {
+        DB::table('unclaimed_codes')->insertOrIgnore([[
+            'request_id' => $requestId,
+            'order_id' => $order->id,
+            'supplier' => $supplier,
+            'code' => $code,
+            'reason' => $reason,
+            'created_at' => now(),
+        ]]);
+    }
+
+    /** Ни один поставщик не дал кода, и все отказали определённо. Состояние восстановимое. */
+    private function outOfStock(Order $order): void
+    {
+        $nextAttemptAt = now()->addSeconds((int) config('gamestore.supplier.unknown_retry_delay'));
+
+        DB::transaction(function () use ($order, $nextAttemptAt): void {
+            $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::OutOfStock, [
+                'next_attempt_at' => $nextAttemptAt,
+            ]);
         });
 
         Log::warning('delivery.out_of_stock', [
             'event' => 'delivery.out_of_stock',
             'order_id' => $order->id,
-            'request_id' => $requestId,
             'outcome' => 'out_of_stock',
-            'reason' => $outcome->reason,
-        ]);
-    }
-
-    /**
-     * Неопределённость. Поставщик мог выдать код, мы этого не знаем.
-     *
-     * Этап 1 закрывает заказ в delivery_failed — восстановимое состояние.
-     * Этап 3 заменит это ретраем с тем же request_id (он же probe) и уже
-     * потом решением про фолбэк.
-     */
-    private function giveUpForNow(Order $order, string $requestId, SupplierOutcome $outcome): void
-    {
-        DB::transaction(function () use ($order, $requestId, $outcome): void {
-            DB::table('supplier_requests')->where('request_id', $requestId)->update([
-                'state' => SupplierRequestState::Unknown->value,
-                'error_reason' => $outcome->reason,
-                'updated_at' => now(),
-            ]);
-
-            $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::DeliveryFailed);
-        });
-
-        Log::error('delivery.failed', [
-            'event' => 'delivery.failed',
-            'order_id' => $order->id,
-            'request_id' => $requestId,
-            'outcome' => 'unknown',
-            'reason' => $outcome->reason,
+            'attempt' => $order->attempts,
+            'next_attempt_at' => $nextAttemptAt->toIso8601String(),
         ]);
     }
 }

@@ -1,9 +1,12 @@
 <?php
 
+use App\Domain\Order\Order;
+use App\Domain\Stub\StubConfig;
 use App\Domain\Stub\StubIssuer;
 use Database\Seeders\CatalogSeeder;
 use Database\Seeders\KeyPoolSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -41,6 +44,16 @@ function useInProcessSupplier(): void
             $body['sku'],
         );
 
+        // force=timeout_after_issue: выдача уже в БД, а ответ до нас не дошёл.
+        // В проде это 5 секунд сна и таймаут клиента; в тесте спать эти секунды
+        // на каждой попытке незачем — важна механика, а не длительность паузы.
+        // Повтор тем же request_id пойдёт по ветке replayed и ответ получит.
+        $hangs = StubConfig::for($supplier)['force'] === 'timeout_after_issue';
+
+        if ($hangs && $result->status === 200 && ! $result->replayed) {
+            throw new ConnectionException('cURL error 28: Operation timed out');
+        }
+
         if ($result->status !== 200) {
             return Http::response(['status' => 'error', 'reason' => $result->reason], $result->status);
         }
@@ -67,6 +80,15 @@ function nextOrderId(): string
     $next = (int) $seq->last_value + ($seq->is_called ? 1 : 0);
 
     return config('gamestore.order_id_prefix').str_pad((string) $next, 5, '0', STR_PAD_LEFT);
+}
+
+/** Создаёт заказ и доводит его до оплаты. */
+function paidOrder(string $sku = 'KEY-CS2-PRIME'): Order
+{
+    $id = test()->postJson('/api/orders', ['sku' => $sku])->json('id');
+    test()->postJson('/api/webhooks/payment', webhookPayload($id))->assertOk();
+
+    return Order::findOrFail($id);
 }
 
 /** @param array<string, mixed> $overrides */

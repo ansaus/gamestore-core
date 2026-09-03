@@ -8,6 +8,8 @@ final readonly class SupplierOutcome
         public SupplierOutcomeKind $kind,
         public ?string $code = null,
         public ?string $reason = null,
+        /** Сколько HTTP-попыток с одним и тем же request_id к этому исходу привело. */
+        public int $attempts = 1,
     ) {}
 
     public static function succeeded(string $code): self
@@ -23,5 +25,10 @@ final readonly class SupplierOutcome
     public static function unknown(string $reason): self
     {
         return new self(SupplierOutcomeKind::Unknown, reason: $reason);
+    }
+
+    public function afterAttempts(int $attempts): self
+    {
+        return new self($this->kind, $this->code, $this->reason, $attempts);
     }
 }

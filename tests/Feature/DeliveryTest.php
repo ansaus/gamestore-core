@@ -15,15 +15,6 @@ use Illuminate\Support\Facades\Http;
 
 beforeEach(fn () => seedShop());
 
-/** Создаёт заказ и доводит его до оплаты. */
-function paidOrder(string $sku = 'KEY-CS2-PRIME'): Order
-{
-    $id = test()->postJson('/api/orders', ['sku' => $sku])->json('id');
-    test()->postJson('/api/webhooks/payment', webhookPayload($id))->assertOk();
-
-    return Order::findOrFail($id);
-}
-
 it('доводит оплаченный заказ до delivered с кодом из пула', function () {
     useInProcessSupplier();
 
@@ -67,19 +58,24 @@ it('повторный запуск выдачи для выданного за�
         ->and(StubIssue::count())->toBe(1);
 });
 
-it('уводит заказ в out_of_stock, когда пул пуст', function () {
+it('уводит заказ в out_of_stock, когда пусты пулы обоих поставщиков', function () {
     useInProcessSupplier();
-    StubKey::where('supplier', 'A')->delete();
+    StubKey::query()->delete();
 
     $order = paidOrder();
 
     $order->refresh();
     expect($order->status)->toBe(OrderStatus::OutOfStock)
-        ->and(Delivery::count())->toBe(0);
+        ->and(Delivery::count())->toBe(0)
+        // Состояние восстановимое: после пополнения фоновое доведение вернётся.
+        ->and($order->next_attempt_at)->not->toBeNull();
 
-    $request = SupplierRequest::findOrFail("req_{$order->id}_A");
-    expect($request->state)->toBe(SupplierRequestState::Failed)
-        ->and($request->error_reason)->toBe('out_of_stock');
+    // Оба поставщика отказали ОПРЕДЕЛЁННО — ключ не потрачен ни у кого.
+    foreach (['A', 'B'] as $supplier) {
+        $request = SupplierRequest::findOrFail("req_{$order->id}_{$supplier}");
+        expect($request->state)->toBe(SupplierRequestState::Failed)
+            ->and($request->error_reason)->toBe('out_of_stock');
+    }
 });
 
 it('трактует 5xx поставщика как неопределённость, а не отказ', function () {
@@ -87,11 +83,10 @@ it('трактует 5xx поставщика как неопределённо�
 
     $order = paidOrder();
 
-    $order->refresh();
-    expect($order->status)->toBe(OrderStatus::DeliveryFailed);
-
-    // Состояние unknown: поставщик МОГ выдать код. Уходить к другому нельзя.
-    expect(SupplierRequest::findOrFail("req_{$order->id}_A")->state)
+    // Состояние unknown: поставщик МОГ выдать код. Уходить к другому нельзя,
+    // проваливать заказ тоже не за что — исход просто не выяснен.
+    expect($order->refresh()->status)->toBe(OrderStatus::Delivering)
+        ->and(SupplierRequest::findOrFail("req_{$order->id}_A")->state)
         ->toBe(SupplierRequestState::Unknown);
 });
 
@@ -100,7 +95,7 @@ it('трактует таймаут как неопределённость', fu
 
     $order = paidOrder();
 
-    expect($order->refresh()->status)->toBe(OrderStatus::DeliveryFailed)
+    expect($order->refresh()->status)->toBe(OrderStatus::Delivering)
         ->and(SupplierRequest::findOrFail("req_{$order->id}_A")->state)
         ->toBe(SupplierRequestState::Unknown);
 });
