@@ -1,9 +1,12 @@
 <?php
 
 use App\Http\Controllers\Api\AdminController;
+use App\Http\Controllers\Api\CatalogController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PaymentWebhookController;
 use Illuminate\Support\Facades\Route;
+
+Route::get('/catalog', [CatalogController::class, 'index']);
 
 Route::post('/orders', [OrderController::class, 'store']);
 Route::get('/orders/{id}', [OrderController::class, 'show']);
@@ -19,5 +22,3 @@ Route::prefix('admin')->group(function () {
     Route::post('/orders/{id}/retry-delivery', [AdminController::class, 'retryDelivery']);
     Route::post('/stock/{sku}/refill', [AdminController::class, 'refillStock']);
 });
-
-// GET /catalog — этап 5.

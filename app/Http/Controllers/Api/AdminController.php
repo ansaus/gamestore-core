@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Catalog\CatalogCache;
 use App\Domain\Catalog\Product;
 use App\Domain\Delivery\Delivery;
 use App\Domain\Order\Order;
@@ -20,6 +21,8 @@ use Illuminate\Support\Facades\Log;
  */
 class AdminController extends Controller
 {
+    public function __construct(private readonly CatalogCache $catalogCache) {}
+
     public function reconcile(ReconcileReport $report): JsonResponse
     {
         $result = $report->build();
@@ -122,6 +125,8 @@ class AdminController extends Controller
                 ->where('status', OrderStatus::OutOfStock->value)
                 ->update(['next_attempt_at' => now(), 'attempts' => 0, 'updated_at' => now()]);
         });
+
+        $this->catalogCache->invalidate();
 
         $available = (int) DB::table('product_stock')->where('sku', $sku)->value('available');
 

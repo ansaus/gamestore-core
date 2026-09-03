@@ -81,17 +81,20 @@ class StubIssuer
     {
         $table = config('gamestore.stub.schema').'.stub_keys';
 
+        // sku is null — универсальный ключ (демо-пул из docs/keys.json).
+        // На нагрузочном датасете ключи привязаны к товару, и тогда заказу
+        // достаётся ключ именно его SKU.
         $row = DB::selectOne("
             update {$table} set request_id = ?, status = 'issued'
             where id = (
                 select id from {$table}
-                where supplier = ? and status = 'free'
+                where supplier = ? and status = 'free' and (sku is null or sku = ?)
                 order by id
                 for update skip locked
                 limit 1
             )
             returning code
-        ", [$requestId, $supplier]);
+        ", [$requestId, $supplier, $sku]);
 
         if ($row === null) {
             return null;

@@ -2,6 +2,7 @@
 
 namespace App\Domain\Delivery;
 
+use App\Domain\Catalog\CatalogCache;
 use App\Domain\Ledger\Ledger;
 use App\Domain\Order\Order;
 use App\Domain\Order\OrderStatus;
@@ -32,6 +33,7 @@ class DeliveryService
         private readonly SupplierClient $client,
         private readonly OrderTransitions $transitions,
         private readonly Ledger $ledger,
+        private readonly CatalogCache $catalogCache,
     ) {}
 
     public function deliver(string $orderId): void
@@ -72,7 +74,12 @@ class DeliveryService
             // ---------------------------------------------------------------
 
             if ($outcome->kind === SupplierOutcomeKind::Succeeded) {
-                $this->finalize($order, $supplier, $requestId, $outcome);
+                if ($this->finalize($order, $supplier, $requestId, $outcome)) {
+                    // Остаток изменился — витрина больше не актуальна.
+                    // Строго после коммита: инвалидировать то, чего может
+                    // не оказаться в БД, — верный способ показать призрак.
+                    $this->catalogCache->invalidate();
+                }
 
                 return;
             }
@@ -190,10 +197,10 @@ class DeliveryService
         string $supplier,
         string $requestId,
         SupplierOutcome $outcome,
-    ): void {
+    ): bool {
         $code = (string) $outcome->code;
 
-        DB::transaction(function () use ($order, $supplier, $requestId, $outcome, $code): void {
+        return DB::transaction(function () use ($order, $supplier, $requestId, $outcome, $code): bool {
             $order = Order::where('id', $order->id)->lockForUpdate()->first();
 
             if (Delivery::where('order_id', $order->id)->exists()) {
@@ -209,7 +216,7 @@ class DeliveryService
                     'outcome' => 'unclaimed',
                 ]);
 
-                return;
+                return false;
             }
 
             try {
@@ -254,7 +261,7 @@ class DeliveryService
                     'outcome' => 'code_already_sold',
                 ]);
 
-                return;
+                return false;
             }
 
             $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::Delivered, [
@@ -283,6 +290,8 @@ class DeliveryService
                 'supplier' => $supplier,
                 'outcome' => 'delivered',
             ]);
+
+            return true;
         });
     }
 
