@@ -1,6 +1,6 @@
 <?php
 
-use Monolog\Formatter\JsonFormatter;
+use App\Support\Logging\StructuredFormatter;
 use Monolog\Handler\NullHandler;
 use Monolog\Handler\StreamHandler;
 use Monolog\Handler\SyslogUdpHandler;
@@ -67,7 +67,7 @@ return [
             'driver' => 'monolog',
             'handler' => StreamHandler::class,
             'handler_with' => ['stream' => 'php://stdout'],
-            'formatter' => JsonFormatter::class,
+            'formatter' => StructuredFormatter::class,
             'level' => env('LOG_LEVEL', 'debug'),
         ],
 

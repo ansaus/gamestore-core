@@ -242,9 +242,7 @@ class DeliveryService
                     ->where('id', $order->id)
                     ->where('status', OrderStatus::Delivering->value)
                     ->update([
-                        'next_attempt_at' => now()->addSeconds(
-                            (int) config('gamestore.supplier.unknown_retry_delay')
-                        ),
+                        'next_attempt_at' => RetrySchedule::nextAttemptAt($order->attempts),
                         'updated_at' => now(),
                     ]);
 
@@ -306,8 +304,7 @@ class DeliveryService
         SupplierOutcome $outcome,
     ): void {
         $exhausted = $order->attempts >= (int) config('gamestore.supplier.max_delivery_cycles');
-        $delay = (int) config('gamestore.supplier.unknown_retry_delay');
-        $nextAttemptAt = now()->addSeconds($delay);
+        $nextAttemptAt = RetrySchedule::nextAttemptAt($order->attempts);
 
         DB::transaction(function () use ($order, $requestId, $outcome, $exhausted, $nextAttemptAt): void {
             $this->recordOutcome($requestId, SupplierRequestState::Unknown, $outcome);
@@ -372,7 +369,7 @@ class DeliveryService
     /** Ни один поставщик не дал кода, и все отказали определённо. Состояние восстановимое. */
     private function outOfStock(Order $order): void
     {
-        $nextAttemptAt = now()->addSeconds((int) config('gamestore.supplier.unknown_retry_delay'));
+        $nextAttemptAt = RetrySchedule::nextAttemptAt($order->attempts);
 
         DB::transaction(function () use ($order, $nextAttemptAt): void {
             $this->transitions->apply($order->id, [OrderStatus::Delivering], OrderStatus::OutOfStock, [

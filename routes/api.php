@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PaymentWebhookController;
 use Illuminate\Support\Facades\Route;
@@ -10,9 +11,13 @@ Route::get('/orders/{id}', [OrderController::class, 'show']);
 Route::post('/webhooks/payment', [PaymentWebhookController::class, 'store']);
 
 /*
-| Дальше по SPEC:
-|   GET  /catalog                          — этап 5
-|   GET  /admin/reconcile                  — этап 4
-|   POST /admin/orders/{id}/retry-delivery — этап 4
-|   POST /admin/stock/{sku}/refill         — этап 4
+| Служебные ручки. Авторизации нет по условию задания (SPEC §0.3),
+| в бою префикс закрывается на ingress.
 */
+Route::prefix('admin')->group(function () {
+    Route::get('/reconcile', [AdminController::class, 'reconcile']);
+    Route::post('/orders/{id}/retry-delivery', [AdminController::class, 'retryDelivery']);
+    Route::post('/stock/{sku}/refill', [AdminController::class, 'refillStock']);
+});
+
+// GET /catalog — этап 5.
