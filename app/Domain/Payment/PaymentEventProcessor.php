@@ -21,6 +21,9 @@ use Illuminate\Support\Facades\Log;
  *   3. Применение статуса + проводки.
  * Внутри транзакции нет ни одного внешнего вызова (I7); выдача уходит в
  * очередь строго afterCommit.
+ *
+ * Второй вход в ту же логику — applyPending(): события, пришедшие раньше
+ * заказа, применяются позже и уже из журнала, а не из HTTP.
  */
 class PaymentEventProcessor
 {
@@ -47,7 +50,7 @@ class PaymentEventProcessor
 
             if ($order === null) {
                 // Событие раньше заказа. Сохраняем и оставляем applied_at = null:
-                // по этому признаку сирот подхватывает этап 2.
+                // ровно по этому признаку его найдёт applyPending().
                 $this->finish($data->eventId, PaymentApplyResult::Orphan, applied: false);
 
                 Log::info('payment.orphan', [
@@ -60,21 +63,77 @@ class PaymentEventProcessor
                 return PaymentApplyResult::Orphan;
             }
 
-            $mismatch = $this->amountMismatches($data, $order);
-            $result = $this->apply($data, $order);
-
-            $this->finish($data->eventId, $result, applied: true, mismatch: $mismatch);
-
-            Log::info('payment.applied', [
-                'event' => 'payment.applied',
-                'event_id' => $data->eventId,
-                'order_id' => $order->id,
-                'outcome' => $result->value,
-                'amount_mismatch' => $mismatch,
-            ]);
-
-            return $result;
+            return $this->applyToOrder($data, $order, source: 'webhook');
         });
+    }
+
+    /**
+     * Подхват событий, пришедших раньше заказа (SPEC §5.3).
+     *
+     * Вызывается из двух мест: при создании заказа — в той же транзакции, что
+     * и вставка; и фоновой задачей ReconcileOrphanEvents — на случай, если
+     * заказ появился мимо этого пути.
+     *
+     * Порядок применения — по occurred_at из payload, при равенстве по
+     * received_at. Событие без occurred_at считается случившимся тогда, когда
+     * мы его получили: другой отметки времени у нас про него нет.
+     *
+     * @return int сколько событий применено
+     */
+    public function applyPending(string $orderId): int
+    {
+        return DB::transaction(function () use ($orderId): int {
+            // Тот же порядок блокировок, что и в process(): сначала заказ.
+            // Иначе два подхвата по одному заказу встанут в дедлок.
+            $order = Order::where('id', $orderId)->lockForUpdate()->first();
+
+            if ($order === null) {
+                return 0;
+            }
+
+            $pending = PaymentEvent::where('order_id', $orderId)
+                ->whereNull('applied_at')
+                ->orderByRaw('coalesce(occurred_at, received_at) asc, received_at asc')
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($pending as $event) {
+                // Каждое следующее событие смотрит на статус, оставленный
+                // предыдущим: paid поверх payment_failed должен видеть отказ.
+                $this->applyToOrder(PaymentEventData::fromEvent($event), $order->refresh(), source: 'orphan_pickup');
+            }
+
+            if ($pending->isNotEmpty()) {
+                Log::info('payment.orphan_resolved', [
+                    'event' => 'payment.orphan_resolved',
+                    'order_id' => $orderId,
+                    'outcome' => 'applied',
+                    'count' => $pending->count(),
+                ]);
+            }
+
+            return $pending->count();
+        });
+    }
+
+    /** Применение события к найденному и уже заблокированному заказу. */
+    private function applyToOrder(PaymentEventData $data, Order $order, string $source): PaymentApplyResult
+    {
+        $mismatch = $this->amountMismatches($data, $order);
+        $result = $this->apply($data, $order);
+
+        $this->finish($data->eventId, $result, applied: true, mismatch: $mismatch);
+
+        Log::info('payment.applied', [
+            'event' => 'payment.applied',
+            'event_id' => $data->eventId,
+            'order_id' => $order->id,
+            'outcome' => $result->value,
+            'amount_mismatch' => $mismatch,
+            'source' => $source,
+        ]);
+
+        return $result;
     }
 
     /** @return bool false, если событие с таким event_id уже принято */

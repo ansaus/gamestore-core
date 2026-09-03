@@ -8,6 +8,13 @@ return [
     */
     'order_id_prefix' => env('ORDER_ID_PREFIX', 'ord_'),
 
+    /*
+    | Собственный адрес магазина изнутри сети Compose. Нужен скриптам из
+    | /scripts: они бьют по настоящему HTTP через nginx, а не поднимают
+    | приложение в своём процессе — иначе гонки не будет.
+    */
+    'internal_base_url' => env('APP_INTERNAL_URL', 'http://nginx'),
+
     'supplier' => [
         'base_url' => env('SUPPLIER_BASE_URL', 'http://nginx:90'),
         'connect_timeout' => (float) env('SUPPLIER_CONNECT_TIMEOUT', 1),

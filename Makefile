@@ -3,7 +3,8 @@ EXEC := $(DC) exec -T app
 
 .DEFAULT_GOAL := help
 .PHONY: help up down build migrate fresh seed test race \
-        scenario-timeout scenario-fallback scenario-oos scenario-race \
+        scenario-timeout scenario-fallback scenario-oos \
+        scenario-race scenario-race-dup scenario-race-mixed \
         reconcile bench logs shell stub-reset
 
 help: ## Show this help
@@ -37,10 +38,17 @@ test: ## Run the full test suite
 
 # ---- Acceptance scenarios (section 10 of SPEC) ------------------------------
 
-scenario-race: ## Scenario 1/1b: 50 parallel paid webhooks for one order
-	$(EXEC) php scripts/race.php --n=$(or $(N),50) --mode=$(or $(MODE),distinct-events)
+scenario-race: ## Scenario 1: 50 parallel paid webhooks, distinct event_id
+	$(EXEC) php scripts/race.php --n=$(or $(N),50) --mode=$(or $(MODE),distinct-events) \
+		$(if $(ORDER),--order=$(ORDER),) $(if $(SKU),--sku=$(SKU),)
 
-race: scenario-race ## alias
+scenario-race-dup: ## Scenario 1b: the same 50 webhooks, one shared event_id
+	$(EXEC) php scripts/race.php --n=$(or $(N),50) --mode=same-event
+
+scenario-race-mixed: ## Scenario 3: paid, duplicates and late failed events at once
+	$(EXEC) php scripts/race.php --n=$(or $(N),50) --mode=mixed
+
+race: scenario-race scenario-race-dup scenario-race-mixed ## All three race modes
 
 scenario-timeout: ## Scenario 4: supplier times out AFTER issuing a code
 	$(EXEC) php scripts/scenario_timeout.php

@@ -5,6 +5,7 @@ use Database\Seeders\CatalogSeeder;
 use Database\Seeders\KeyPoolSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -51,6 +52,21 @@ function useInProcessSupplier(): void
             'replayed' => $result->replayed,
         ]);
     });
+}
+
+/**
+ * Каким будет id следующего созданного заказа.
+ *
+ * Нужен тестам про сироту: событие приходит раньше заказа, а значит его
+ * order_id надо знать заранее. Захардкодить ord_00001 нельзя — nextval()
+ * не откатывается вместе с транзакцией теста и растёт по всему прогону.
+ */
+function nextOrderId(): string
+{
+    $seq = DB::selectOne('select last_value, is_called from orders_public_id_seq');
+    $next = (int) $seq->last_value + ($seq->is_called ? 1 : 0);
+
+    return config('gamestore.order_id_prefix').str_pad((string) $next, 5, '0', STR_PAD_LEFT);
 }
 
 /** @param array<string, mixed> $overrides */

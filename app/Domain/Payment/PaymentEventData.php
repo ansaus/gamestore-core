@@ -37,4 +37,21 @@ final readonly class PaymentEventData
             payload: $raw ?? $payload,
         );
     }
+
+    /**
+     * Событие, уже лежащее в журнале. Нужно подхвату сирот: там событие
+     * пришло раньше заказа и применяется вторым заходом, из БД, а не из HTTP.
+     */
+    public static function fromEvent(PaymentEvent $event): self
+    {
+        return new self(
+            eventId: (string) $event->event_id,
+            orderId: (string) $event->order_id,
+            status: $event->status,
+            amount: $event->amount !== null ? (string) $event->amount : null,
+            currency: $event->currency !== null ? strtoupper(trim((string) $event->currency)) : null,
+            occurredAt: $event->occurred_at?->toImmutable(),
+            payload: $event->payload ?? [],
+        );
+    }
 }
