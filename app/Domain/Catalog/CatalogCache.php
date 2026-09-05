@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Cache;
  *
  * Витрина остатков допускает eventual consistency: точная правда проверяется
  * в момент выдачи, а расхождение приводит к восстановимому out_of_stock, а не
- * к продаже воздуха (SPEC §9).
+ * к продаже воздуха.
  */
 class CatalogCache
 {

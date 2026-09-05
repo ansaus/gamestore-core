@@ -5,7 +5,7 @@ namespace App\Domain\Catalog;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Витрина каталога (SPEC §9).
+ * Витрина каталога (этап 5).
  *
  * Два решения, ради которых класс и существует.
  *

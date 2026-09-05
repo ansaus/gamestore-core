@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 
 /*
-| Этап 4 (SPEC §8): отчёт сверки, ручные ручки, фоновое доведение.
+| Этап 4: отчёт сверки, ручные ручки, фоновое доведение.
 */
 
 beforeEach(fn () => seedShop());

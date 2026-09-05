@@ -38,7 +38,7 @@ class CatalogSeeder extends Seeder
          * точного «остатка по SKU» не существует. Стартуем от размера пула:
          * витрина допускает eventual consistency, точная правда проверяется
          * в момент выдачи, а расхождение приводит к восстановимому
-         * out_of_stock, а не к продаже воздуха (SPEC §9).
+         * out_of_stock, а не к продаже воздуха.
          */
         $poolSize = array_sum(config('gamestore.stub.key_split'));
 

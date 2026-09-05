@@ -11,7 +11,7 @@ return new class extends Migration
         /*
         | Код пришёл от поставщика, но заказу он уже не нужен: выдача по нему
         | состоялась раньше. Выбрасывать нельзя — за него заплачено, он идёт
-        | в сверку и возврат поставщику (SPEC §7.4).
+        | в сверку и возврат поставщику.
         */
         Schema::create('unclaimed_codes', function (Blueprint $table) {
             $table->bigIncrements('id');

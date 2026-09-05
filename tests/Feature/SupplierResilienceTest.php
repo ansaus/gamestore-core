@@ -14,7 +14,7 @@ use App\Jobs\DeliverOrderJob;
 use Illuminate\Support\Facades\Http;
 
 /*
-| Этап 3 (SPEC §7): ретраи тем же request_id, «таймаут ≠ отказ»,
+| Этап 3: ретраи тем же request_id, «таймаут ≠ отказ»,
 | фолбэк A→B только при ОПРЕДЕЛЁННОМ отказе A.
 */
 

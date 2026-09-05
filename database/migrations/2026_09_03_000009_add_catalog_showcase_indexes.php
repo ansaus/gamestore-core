@@ -6,7 +6,7 @@ use Illuminate\Support\Facades\DB;
 return new class extends Migration
 {
     /*
-    | Индексы витрины (SPEC §9).
+    | Индексы витрины (этап 5).
     |
     | Оба частичные по is_active: неактивные товары витрина не показывает
     | никогда, и держать их в индексе незачем. Оба заканчиваются на sku —

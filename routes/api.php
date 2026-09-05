@@ -14,7 +14,7 @@ Route::get('/orders/{id}', [OrderController::class, 'show']);
 Route::post('/webhooks/payment', [PaymentWebhookController::class, 'store']);
 
 /*
-| Служебные ручки. Авторизации нет по условию задания (SPEC §0.3),
+| Служебные ручки. Авторизации нет по условию задания,
 | в бою префикс закрывается на ingress.
 */
 Route::prefix('admin')->group(function () {

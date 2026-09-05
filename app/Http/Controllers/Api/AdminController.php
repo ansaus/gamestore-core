@@ -17,7 +17,7 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Служебные ручки. Авторизации нет сознательно — её нет во всём задании
- * (SPEC §0.3); в бою этот префикс закрывается на уровне ingress.
+ * по условию задания; в бою этот префикс закрывается на уровне ingress.
  */
 class AdminController extends Controller
 {

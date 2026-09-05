@@ -14,7 +14,7 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        // Контракты в SPEC §4 — плоские объекты, обёртка "data" в них не предусмотрена.
+        // Контракты в docs/TASK.md — плоские объекты, обёртка "data" в них не предусмотрена.
         JsonResource::withoutWrapping();
     }
 }

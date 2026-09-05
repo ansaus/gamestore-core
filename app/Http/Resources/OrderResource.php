@@ -38,7 +38,7 @@ class OrderResource extends JsonResource
 
     /**
      * Таймлайн собирается из отметок времени самого заказа: отдельной таблицы
-     * истории в схеме SPEC §2 нет. Статусы без своей колонки (delivering,
+     * истории в схеме нет. Статусы без своей колонки (delivering,
      * out_of_stock, ...) показываются один раз, по updated_at.
      *
      * @return list<array{status: string, at: ?string}>

@@ -6,7 +6,7 @@ use Monolog\Formatter\JsonFormatter;
 use Monolog\LogRecord;
 
 /**
- * Одна строка JSON на событие, поля из SPEC §8 — на верхнем уровне.
+ * Одна строка JSON на событие, обязательные поля — на верхнем уровне.
  *
  * Стандартный JsonFormatter прячет их в context, и запрос «вся история по
  * одному заказу» превращается в `.context.order_id`. Здесь же:
@@ -18,7 +18,7 @@ use Monolog\LogRecord;
  */
 class StructuredFormatter extends JsonFormatter
 {
-    /** Поля, обязательные по SPEC §8, в фиксированном порядке. */
+    /** Обязательные поля события, в фиксированном порядке. */
     private const FIELDS = [
         'order_id', 'event_id', 'request_id',
         'supplier', 'attempt', 'outcome', 'duration_ms',

@@ -10,7 +10,7 @@ use App\Jobs\ReconcileOrphanEvents;
 use Illuminate\Support\Facades\Queue;
 
 /*
-| Сценарий 3 из SPEC §10: вебхук пришёл раньше заказа или не по порядку.
+| Сценарий приёмки 3 (docs/TASK.md): вебхук пришёл раньше заказа или не по порядку.
 | Выдача здесь не проверяется — ей посвящён DeliveryTest.
 */
 

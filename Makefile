@@ -36,7 +36,7 @@ endif
 test: ## Run the full test suite
 	$(EXEC) php artisan test
 
-# ---- Acceptance scenarios (section 10 of SPEC) ------------------------------
+# ---- Acceptance scenarios (docs/TASK.md, критерии приёмки) ------------------
 
 scenario-race: ## Scenario 1: 50 parallel paid webhooks, distinct event_id
 	$(EXEC) php scripts/race.php --n=$(or $(N),50) --mode=$(or $(MODE),distinct-events) \

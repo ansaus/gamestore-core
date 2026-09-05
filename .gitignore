@@ -15,3 +15,5 @@
 .idea
 .vscode
 !/storage/**/.gitignore
+/SPEC.md
+/CLAUDE.md
